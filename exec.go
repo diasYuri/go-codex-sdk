@@ -66,6 +66,9 @@ func (e *codexExec) run(ctx context.Context, args codexExecArgs) (<-chan string,
 		}
 
 		cmd := exec.CommandContext(ctx, e.executablePath, commandArgs...)
+		if args.workingDirectory != "" {
+			cmd.Dir = args.workingDirectory
+		}
 		cmd.Env = e.buildEnv(args)
 
 		stdin, err := cmd.StdinPipe()
@@ -235,6 +238,9 @@ func (e *codexExec) buildEnv(args codexExecArgs) []string {
 	}
 	if args.apiKey != "" {
 		env["CODEX_API_KEY"] = args.apiKey
+	}
+	if args.workingDirectory != "" {
+		env["PWD"] = args.workingDirectory
 	}
 
 	out := make([]string, 0, len(env))

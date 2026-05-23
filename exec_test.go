@@ -83,6 +83,32 @@ func TestBuildEnvOverrideDoesNotInheritProcessEnv(t *testing.T) {
 	}
 }
 
+func TestBuildEnvSetsPWDWhenWorkingDirectoryIsProvided(t *testing.T) {
+	exec := newCodexExec("codex", map[string]string{
+		"PWD":         "/tmp/old",
+		"CODEX_HOME":  "/tmp/codex-home",
+		"CUSTOM_ENV":  "custom",
+		"EXTRA_VALUE": "extra",
+	}, nil)
+
+	env := envSliceToMap(exec.buildEnv(codexExecArgs{workingDirectory: "/tmp/project"}))
+	if env["PWD"] != "/tmp/project" {
+		t.Fatalf("PWD mismatch: %#v", env)
+	}
+	if env["CODEX_HOME"] != "/tmp/codex-home" {
+		t.Fatalf("CODEX_HOME mismatch: %#v", env)
+	}
+	if env["CUSTOM_ENV"] != "custom" {
+		t.Fatalf("CUSTOM_ENV mismatch: %#v", env)
+	}
+	if env["EXTRA_VALUE"] != "extra" {
+		t.Fatalf("EXTRA_VALUE mismatch: %#v", env)
+	}
+	if env[internalOriginatorEnv] != goSDKOriginator {
+		t.Fatalf("originator mismatch: %#v", env)
+	}
+}
+
 func TestCodexExecRunStreamsLinesAndWritesInput(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args.txt")
@@ -120,6 +146,53 @@ func TestCodexExecRunStreamsLinesAndWritesInput(t *testing.T) {
 	}
 }
 
+func TestCodexExecRunUsesWorkingDirectoryAsProcessCwd(t *testing.T) {
+	workingDir := t.TempDir()
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	pwdPath := filepath.Join(dir, "pwd.txt")
+	fake := writeFakeCodex(t, dir)
+
+	exec := newCodexExec(fake, map[string]string{
+		"PATH":                  os.Getenv("PATH"),
+		"FAKE_CODEX_ARGS_FILE":  argsPath,
+		"FAKE_CODEX_STDIN_FILE": stdinPath,
+		"FAKE_CODEX_STDOUT":     `{"type":"turn.started"}` + "\n" + `{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}`,
+		"FAKE_CODEX_PWD_FILE":   pwdPath,
+	}, nil)
+
+	lines, errs := exec.run(context.Background(), codexExecArgs{
+		input:            "hello",
+		workingDirectory: workingDir,
+	})
+	var got []string
+	for line := range lines {
+		got = append(got, line)
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+
+	expectedLines := []string{
+		`{"type":"turn.started"}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}`,
+	}
+	if !reflect.DeepEqual(got, expectedLines) {
+		t.Fatalf("lines mismatch\nwant: %#v\n got: %#v", expectedLines, got)
+	}
+	if data := readFile(t, stdinPath); data != "hello" {
+		t.Fatalf("stdin mismatch: %q", data)
+	}
+	if args := strings.Fields(readFile(t, argsPath)); !reflect.DeepEqual(args[:2], []string{"exec", "--experimental-json"}) {
+		t.Fatalf("args mismatch: %#v", args)
+	}
+	assertPair(t, strings.Fields(readFile(t, argsPath)), "--cd", workingDir)
+	if gotPwd := strings.TrimSpace(readFile(t, pwdPath)); gotPwd != workingDir {
+		t.Fatalf("cwd mismatch\nwant: %q\n got: %q", workingDir, gotPwd)
+	}
+}
+
 func TestCodexExecRunReturnsExitErrorWithStderr(t *testing.T) {
 	dir := t.TempDir()
 	fake := writeFakeCodex(t, dir)
@@ -149,6 +222,9 @@ if [ -n "$FAKE_CODEX_STDIN_FILE" ]; then
   cat > "$FAKE_CODEX_STDIN_FILE"
 else
   cat > /dev/null
+fi
+if [ -n "$FAKE_CODEX_PWD_FILE" ]; then
+  pwd > "$FAKE_CODEX_PWD_FILE"
 fi
 if [ -n "$FAKE_CODEX_STDERR" ]; then
   printf '%s' "$FAKE_CODEX_STDERR" >&2
